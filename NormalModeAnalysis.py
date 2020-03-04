@@ -8,6 +8,7 @@ from math import pi
 from copy import deepcopy 
 from warnings import warn
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 matplotlib.rcParams['figure.dpi'] = 600
 
@@ -23,19 +24,21 @@ class NormalModeAnalysis(object):
             CPUProp (dictionary=None): The CPU platform-specific properties used for generating simulation object in OpenMM.
             CUDAProp (dictionary=None): The CUDA platform-specific properties used for generating simulation object in OpenMM.
     """
-    def __init__(self, topology, system, integrator, initPositions, CPUProp=None, CUDAProp=None):
+    def __init__(self, topology, system, integrator, initPositions, CPUProp=None, CUDAProp=None, CPUOnly = False):
         self.topology = topology
         self.CPUSystem = deepcopy(system)
-        self.CUDASystem = deepcopy(system)
-        self.CPUIntegrator = deepcopy(integrator)
-        self.CUDAIntegrator = deepcopy(integrator)
+        self.CPUIntegrator = deepcopy(integrator)        
         self.initPositions = initPositions
-        self.CPUProp = CPUProp
-        self.CUDAProp = CUDAProp
+        self.CPUProp = CPUProp        
         self.CPUSimulation = self.__getCPUSimulation__()
-        self.CUDASimulation = self.__getCUDASimulation__()
         self.CPUSimulation.context.setPositions(self.initPositions)
-        self.CUDASimulation.context.setPositions(self.initPositions)
+        
+        if not self.CPUOnly:
+            self.CUDASystem = deepcopy(system)
+            self.CUDAIntegrator = deepcopy(integrator)
+            self.CUDAProp = CUDAProp
+            self.CUDASimulation = self.__getCUDASimulation__()
+            self.Simulation.context.setPositions(self.initPositions)
 
     def __getDefaultCPUProperty__(self):
         pass
@@ -86,7 +89,9 @@ class NormalModeAnalysis(object):
         """
         self.CPUSimulation.minimizeEnergy()
         PreMinimizedState = self.CPUSimulation.context.getState(getPositions=True, getEnergy=True, getForces=True)
-        self.CUDASimulation.context.setState(PreMinimizedState)
+        if not self.CPUOnly:
+            self.CUDASimulation.context.setState(PreMinimizedState)
+        
 
     def CUDAMinimizationCycle(self, MiniTolerance=0, MaxMiniCycle=1000, NumMiniStepPerCycle=10000, MiniForceRatio=1e-6):
         """
@@ -113,6 +118,31 @@ class NormalModeAnalysis(object):
             currentMeanForce = np.linalg.norm(currentForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
             if currentMeanForce < self.MiniForceThreshold:
                 break
+              
+    def CPUMinimizationCycle(self, MiniTolerance=0, MaxMiniCycle=1000, NumMiniStepPerCycle=10000, MiniForceRatio=1e-6):
+        """
+            Similar to CUDAMinimizationCycle() but with CPU only
+
+            Args:
+            MiniTolerance (energy=0*kilojoule/mole): The energy tolerance to which the system should be minimized set for each cycle.
+            MaxMiniCycle (int=1000): The maximum number of cycles to perform energy minimizations.
+            NumMiniStepPerCycle (int=10000): MaxIterations for each cycle of energy minimization.
+            MiniForceRatio (double=1e-6): The order of mean force that the minimization cycle should eliminated.
+        """
+        PreMinimizedState = self.CPUSimulation.context.getState(getPositions=True, getEnergy=True, getForces=True)
+        PreMinimizedForces = PreMinimizedState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
+        PreMinimizedMeanForce = np.linalg.norm(PreMinimizedForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
+        self.MiniForceThreshold = PreMinimizedMeanForce * MiniForceRatio
+
+        for i in range(MaxMiniCycle):
+            self.CPUSimulation.minimizeEnergy(tolerance=MiniTolerance*kilojoule/mole, maxIterations=NumMiniStepPerCycle)
+            currentState = self.CPUSimulation.context.getState(getForces=True)
+            currentForces = currentState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
+            currentMeanForce = np.linalg.norm(currentForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
+            if currentMeanForce < self.MiniForceThreshold:
+                break            
+                
+                
 
     def CalculateNormalModes(self, TweakEnergyRatio=1e-12):
         """
@@ -129,13 +159,19 @@ class NormalModeAnalysis(object):
             Args:
             TweakEnergyRatio (double=1e-12): The pre-designed order of the change of the potential energy to determine positional tweak displacements.
         """
-        MinimizedState = self.CUDASimulation.context.getState(getPositions=True, getEnergy=True, getForces=True)
+        if self.CPUOnly:
+            MinimizedState = self.CPUSimulation.context.getState(getPositions=True, getEnergy=True, getForces=True)
+        else:
+            MinimizedState = self.CUDASimulation.context.getState(getPositions=True, getEnergy=True, getForces=True)
         MinimizedPositions = MinimizedState.getPositions(asNumpy=True).in_units_of(angstrom)
         MinimizedPotentialEnergy = MinimizedState.getPotentialEnergy().in_units_of(kilocalorie/mole)
         MinimizedForces = MinimizedState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
         MinimizedMeanForce = np.linalg.norm(MinimizedForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
-
-        NumAtoms = self.CUDASimulation.system.getNumParticles()
+      
+        if self.CPUonly:
+            NumAtoms = self.CPUSimulation.system.getNumParticles()
+        else:    
+            NumAtoms = self.CUDASimulation.system.getNumParticles()
         TweakEnergyDiff = MinimizedPotentialEnergy/NumAtoms * TweakEnergyRatio
         self.TweakDisplacement = abs((TweakEnergyDiff/MinimizedMeanForce).in_units_of(angstrom))
         NumDimension = MinimizedForces.shape[0]*MinimizedForces.shape[1]
@@ -153,8 +189,12 @@ class NormalModeAnalysis(object):
             currentPositions3NPos[i] += self.TweakDisplacement.value_in_unit(angstrom)
             currentPositions3NPosQuantity = currentPositions3NPos.reshape((NumAtoms,3)) * angstrom
             currentPositions3NPosQuantity = currentPositions3NPosQuantity.in_units_of(nanometer)
-            self.CUDASimulation.context.setPositions(currentPositions3NPosQuantity)
-            NewStatePos = self.CUDASimulation.context.getState(getEnergy=True, getForces=True)
+            if self.CPUOnly:
+                self.CPUSimulation.context.setPositions(currentPositions3NPosQuantity)
+                NewStatePos = self.CPUSimulation.context.getState(getEnergy=True, getForces=True)
+            else:
+                self.CUDASimulation.context.setPositions(currentPositions3NPosQuantity)
+                NewStatePos = self.CUDASimulation.context.getState(getEnergy=True, getForces=True)
             NewForcesPos = NewStatePos.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom)).reshape((1,NumDimension))[0]
             TweakForces[2*i,:] = NewForcesPos
             TweakEnergies[2*i] = NewStatePos.getPotentialEnergy().value_in_unit(kilocalorie/mole)
@@ -164,8 +204,12 @@ class NormalModeAnalysis(object):
             currentPositions3NNeg[i] -= self.TweakDisplacement.value_in_unit(angstrom)
             currentPositions3NNegQuantity = currentPositions3NNeg.reshape((NumAtoms,3)) * angstrom
             currentPositions3NNegQuantity = currentPositions3NNegQuantity.in_units_of(nanometer)
-            self.CUDASimulation.context.setPositions(currentPositions3NNegQuantity)
-            NewStateNeg = self.CUDASimulation.context.getState(getEnergy=True, getForces=True)
+            if self.CPUOnly:
+                self.PUSimulation.context.setPositions(currentPositions3NNegQuantity)
+                NewStateNeg = self.CPUSimulation.context.getState(getEnergy=True, getForces=True)
+            else:
+                self.CUDASimulation.context.setPositions(currentPositions3NNegQuantity)
+                NewStateNeg = self.CUDASimulation.context.getState(getEnergy=True, getForces=True)
             NewForcesNeg = NewStateNeg.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom)).reshape((1,NumDimension))[0]
             TweakForces[2*i+1,:] = NewForcesNeg
             TweakEnergies[2*i+1] = NewStateNeg.getPotentialEnergy().value_in_unit(kilocalorie/mole)
@@ -178,8 +222,12 @@ class NormalModeAnalysis(object):
             SpringConsts[i,:] = ForceFunction(0,1)
 
         MassArray = np.zeros(NumAtoms)
-        for i in range(NumAtoms):
-            MassArray[i] = self.CUDASimulation.system.getParticleMass(i).value_in_unit(dalton)
+        if self.CPUOnly:
+            for i in range(NumAtoms):
+                MassArray[i] = self.CPUSimulation.system.getParticleMass(i).value_in_unit(dalton)
+        else:
+            for i in range(NumAtoms):
+                MassArray[i] = self.CUDASimulation.system.getParticleMass(i).value_in_unit(dalton)
 
         MassArray3N = np.sqrt(MassArray.repeat(3))
         MassMatrix = np.outer(MassArray3N,MassArray3N)
@@ -224,7 +272,10 @@ class NormalModeAnalysis(object):
     def getVibrationalEntropyCM(self, Temperature=300*kelvin):
         SquareAngularFreqAKMA = self.SquareAngularFreq.value_in_unit(kilocalorie/(gram*angstrom**2))[6:]
         SquareAngularFreqSI = (4.184*10**26)*SquareAngularFreqAKMA
-        NumAtoms = self.CUDASimulation.system.getNumParticles()
+        if self.CPUOnly:
+            NumAtoms = self.CPUSimulation.system.getNumParticles()
+        else:
+            NumAtoms = self.CUDASimulation.system.getNumParticles()
         internalDim = 3*NumAtoms - 6
         Temperature = Temperature.value_in_unit(kelvin)
         kBT = Boltzmann*Temperature
@@ -235,7 +286,10 @@ class NormalModeAnalysis(object):
     def getVibrationalEntropyQM(self, Temperature=300*kelvin):
         SquareAngularFreqAKMA = self.SquareAngularFreq.value_in_unit(kilocalorie/(gram*angstrom**2))[6:]
         AngularFreqSI = np.sqrt((4.184*10**26)*SquareAngularFreqAKMA)
-        NumAtoms = self.CUDASimulation.system.getNumParticles()
+        if self.CPUOnly:
+            NumAtoms = self.CPUSimulation.system.getNumParticles()
+        else:
+            NumAtoms = self.CUDASimulation.system.getNumParticles()
         internalDim = 3*NumAtoms - 6
         Temperature = Temperature.value_in_unit(kelvin)
         kBT = Boltzmann*Temperature
