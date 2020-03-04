@@ -32,13 +32,14 @@ class NormalModeAnalysis(object):
         self.CPUProp = CPUProp        
         self.CPUSimulation = self.__getCPUSimulation__()
         self.CPUSimulation.context.setPositions(self.initPositions)
-        
+
+        self.CPUOnly = CPUOnly  
         if not self.CPUOnly:
             self.CUDASystem = deepcopy(system)
             self.CUDAIntegrator = deepcopy(integrator)
             self.CUDAProp = CUDAProp
             self.CUDASimulation = self.__getCUDASimulation__()
-            self.Simulation.context.setPositions(self.initPositions)
+            self.CUDASimulation.context.setPositions(self.initPositions)
 
     def __getDefaultCPUProperty__(self):
         pass
@@ -116,6 +117,7 @@ class NormalModeAnalysis(object):
             currentState = self.CUDASimulation.context.getState(getForces=True)
             currentForces = currentState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
             currentMeanForce = np.linalg.norm(currentForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
+            print('Current Mean Force: ', currentMeanForce)
             if currentMeanForce < self.MiniForceThreshold:
                 break
               
@@ -139,6 +141,7 @@ class NormalModeAnalysis(object):
             currentState = self.CPUSimulation.context.getState(getForces=True)
             currentForces = currentState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
             currentMeanForce = np.linalg.norm(currentForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
+            print('Current Mean Force: ', currentMeanForce)
             if currentMeanForce < self.MiniForceThreshold:
                 break            
                 
@@ -168,7 +171,7 @@ class NormalModeAnalysis(object):
         MinimizedForces = MinimizedState.getForces(asNumpy=True).value_in_unit(kilocalorie/(mole*angstrom))
         MinimizedMeanForce = np.linalg.norm(MinimizedForces,axis=1).mean() * (kilocalorie/(mole*angstrom))
       
-        if self.CPUonly:
+        if self.CPUOnly:
             NumAtoms = self.CPUSimulation.system.getNumParticles()
         else:    
             NumAtoms = self.CUDASimulation.system.getNumParticles()
@@ -205,7 +208,7 @@ class NormalModeAnalysis(object):
             currentPositions3NNegQuantity = currentPositions3NNeg.reshape((NumAtoms,3)) * angstrom
             currentPositions3NNegQuantity = currentPositions3NNegQuantity.in_units_of(nanometer)
             if self.CPUOnly:
-                self.PUSimulation.context.setPositions(currentPositions3NNegQuantity)
+                self.CPUSimulation.context.setPositions(currentPositions3NNegQuantity)
                 NewStateNeg = self.CPUSimulation.context.getState(getEnergy=True, getForces=True)
             else:
                 self.CUDASimulation.context.setPositions(currentPositions3NNegQuantity)
@@ -238,6 +241,7 @@ class NormalModeAnalysis(object):
         eigValSorted = eigVal[sortIdx]
         eigVecSorted = eigVec[:,sortIdx]
         VibrationalSpectrum = self.__getVibrationalSpectrum__(eigValSorted[6:])
+        TransRotFreq = self.__getVibrationalSpectrum__(eigValSorted[:6]) 
 
         if not self.__checkSymmetric__(HessianSymmetric):
             warn('Fatal Warining: The hessian is NOT symmetric !!')
@@ -249,6 +253,7 @@ class NormalModeAnalysis(object):
         self.SquareAngularFreq = eigValSorted * (kilocalorie/(gram*angstrom**2))
         self.NormalModes = eigVecSorted
         self.VibrationalSpectrum = VibrationalSpectrum * (1/centimeter)
+        self.TransRotFreq = TransRotFreq * (1/centimeter)
 
     def PlotVibrationalSpectrum(self, binNum=1000, colorStr='salmon', labelStr='Vibrational Power Spectrum'):
         """
